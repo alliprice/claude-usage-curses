@@ -85,7 +85,7 @@ def fetch_usage(token):
 
 
 def parse_usage(data):
-    """Parse API response into display-ready category list."""
+    """Parse API response into display-ready category list and extra usage info."""
     categories = []
     seen = set()
     for key in CATEGORY_ORDER:
@@ -110,7 +110,7 @@ def parse_usage(data):
         })
     # Handle unknown keys that look like usage categories
     for key, entry in data.items():
-        if key in seen or not isinstance(entry, dict):
+        if key in seen or key == "extra_usage" or not isinstance(entry, dict):
             continue
         utilization = entry.get("utilization")
         resets_at = entry.get("resets_at")
@@ -126,7 +126,18 @@ def parse_usage(data):
             "resets_at": resets_at,
             "window_seconds": window,
         })
-    return categories
+    # Parse extra_usage separately
+    extra = None
+    eu = data.get("extra_usage")
+    if isinstance(eu, dict) and eu.get("is_enabled"):
+        limit = eu.get("monthly_limit", 0)
+        used = eu.get("used_credits", 0.0)
+        extra = {
+            "monthly_limit": limit,
+            "used_credits": used,
+            "utilization": (used / limit * 100) if limit > 0 else 0.0,
+        }
+    return categories, extra
 
 
 def calc_glide_slope(resets_at_str, window_seconds):
@@ -271,7 +282,7 @@ def draw_bar(win, y, x, width, usage_pct, glide_pct):
                 pass
 
 
-def draw_ui(win, categories, last_fetch_time, error_msg):
+def draw_ui(win, categories, extra_usage, last_fetch_time, error_msg):
     """Draw the full UI."""
     win.erase()
     max_h, max_w = win.getmaxyx()
@@ -346,6 +357,22 @@ def draw_ui(win, categories, last_fetch_time, error_msg):
         draw_bar(win, row, margin, content_width, usage, glide)
         row += 2
 
+    # Extra usage
+    if extra_usage and row + 3 < max_h - 2:
+        limit_dollars = extra_usage["monthly_limit"] / 100
+        used_dollars = extra_usage["used_credits"] / 100
+        name = "Extra usage (monthly)"
+        usage_str = f"${used_dollars:.2f} / ${limit_dollars:.2f}"
+        try:
+            win.addstr(row, margin, name, curses.color_pair(5) | curses.A_BOLD)
+            if len(usage_str) < content_width - len(name):
+                win.addstr(row, max_w - margin - len(usage_str), usage_str, curses.color_pair(5))
+        except curses.error:
+            pass
+        row += 2
+        draw_bar(win, row, margin, content_width, extra_usage["utilization"], 100)
+        row += 2
+
     # Footer
     footer = "q: quit  r: refresh"
     footer_row = max_h - 1
@@ -374,6 +401,7 @@ def main(stdscr):
 
     has_focus = True
     categories = []
+    extra_usage = None
     last_fetch_time = None
     last_fetch_attempt = 0
     error_msg = None
@@ -381,7 +409,7 @@ def main(stdscr):
     escape_time = 0
 
     def do_fetch():
-        nonlocal categories, last_fetch_time, last_fetch_attempt, error_msg
+        nonlocal categories, extra_usage, last_fetch_time, last_fetch_attempt, error_msg
         last_fetch_attempt = time.time()
         token, err = get_access_token()
         if err:
@@ -392,7 +420,7 @@ def main(stdscr):
             error_msg = err
             return
         error_msg = None
-        categories = parse_usage(data)
+        categories, extra_usage = parse_usage(data)
         last_fetch_time = time.time()
 
     # Initial fetch
@@ -400,7 +428,7 @@ def main(stdscr):
 
     try:
         while True:
-            draw_ui(stdscr, categories, last_fetch_time, error_msg)
+            draw_ui(stdscr, categories, extra_usage, last_fetch_time, error_msg)
             curses.doupdate()
 
             ch = stdscr.getch()
@@ -449,5 +477,9 @@ def main(stdscr):
         sys.stdout.flush()
 
 
-if __name__ == "__main__":
+def entry_point():
     curses.wrapper(main)
+
+
+if __name__ == "__main__":
+    entry_point()
