@@ -282,70 +282,158 @@ def draw_bar(win, y, x, width, usage_pct, glide_pct):
                 pass
 
 
-def draw_ui(win, categories, extra_usage, last_fetch_time, error_msg):
-    """Draw the full UI."""
+def draw_ui(win, categories, extra_usage, last_fetch_time, error_msg, refresh_interval):
+    """Draw the full UI with progressive compaction for small terminals."""
     win.erase()
     max_h, max_w = win.getmaxyx()
-    if max_h < 3 or max_w < 20:
-        try:
-            win.addstr(0, 0, "Terminal too small")
-        except curses.error:
-            pass
+    if max_h < 1 or max_w < 5:
         win.noutrefresh()
         return
 
-    margin = 2
+    margin = 2 if max_w >= 20 else 0
     content_width = max_w - margin * 2
 
-    # Header
-    title = "Claude Usage Monitor"
-    updated = format_updated_ago(last_fetch_time)
-    row = 0
-    try:
-        win.addstr(row, margin, title, curses.color_pair(6) | curses.A_BOLD)
-        if len(updated) < content_width - len(title) - 2:
-            win.addstr(row, max_w - margin - len(updated), updated, curses.color_pair(5))
-    except curses.error:
-        pass
-    row += 2
+    # Separate core categories (five_hour, seven_day) from extras
+    core = [c for c in categories if c["key"] in ("five_hour", "seven_day")]
+    extra_cats = [c for c in categories if c["key"] not in ("five_hour", "seven_day")]
+    if not core:
+        core = categories
+        extra_cats = []
+    n = len(core)
 
-    # Error message
-    if error_msg:
+    # Determine compaction level based on available height
+    # Adding elements back from most compact (level 0) to most spacious:
+    #   Level 0: just core bars, no spacing (n rows)
+    #   Level 1: + spacing between bars (+n-1)
+    #   Level 2: + first core's reset time (+1)
+    #   Level 3: + first core's title (+1)
+    #   Level 4: + second core's title (+1)
+    #   Level 5: + second core's reset (+1)
+    #   Level 6: + header (+2)
+    #   Level 7+: extra categories, extra usage, footer
+    used = n
+    level = 0
+    steps = [
+        max(n - 1, 0),  # level 1: spacing
+        1 if n >= 1 else 0,  # level 2: first reset
+        1 if n >= 1 else 0,  # level 3: first title
+        1 if n >= 2 else 0,  # level 4: second title
+        1 if n >= 2 else 0,  # level 5: second reset
+        2,  # level 6: header
+    ]
+    for cost in steps:
+        if used + cost <= max_h:
+            level += 1
+            used += cost
+
+    show_spacing = level >= 1
+    show_first_reset = level >= 2 and n >= 1
+    show_first_title = level >= 3 and n >= 1
+    show_second_title = level >= 4 and n >= 2
+    show_second_reset = level >= 5 and n >= 2
+    show_header = level >= 6
+
+    # Extra categories: each needs title + reset + bar + optional spacing
+    show_extra = []
+    for cat in extra_cats:
+        cost = 3 + (1 if show_spacing else 0)
+        if used + cost <= max_h:
+            show_extra.append(cat)
+            used += cost
+
+    # Extra usage
+    show_extra_usage = False
+    if extra_usage:
+        cost = 3 + (1 if show_spacing else 0)
+        if used + cost <= max_h:
+            show_extra_usage = True
+            used += cost
+
+    # Footer
+    show_footer = used + 1 <= max_h
+
+    # === RENDER ===
+    row = 0
+
+    if show_header:
+        title = "Claude Usage Monitor"
+        updated = format_updated_ago(last_fetch_time)
         try:
-            err_display = error_msg[:content_width]
-            win.addstr(row, margin, err_display, curses.color_pair(7))
+            win.addstr(row, margin, title, curses.color_pair(6) | curses.A_BOLD)
+            if len(updated) < content_width - len(title) - 2:
+                win.addstr(row, max_w - margin - len(updated), updated,
+                           curses.color_pair(5))
         except curses.error:
             pass
         row += 2
 
-    # Categories
+    if error_msg:
+        try:
+            win.addstr(row, margin, error_msg[:content_width], curses.color_pair(7))
+        except curses.error:
+            pass
+        row += 2
+
     if not categories and not error_msg:
         try:
             win.addstr(row, margin, "No usage data available", curses.color_pair(5))
         except curses.error:
             pass
+
+    for idx, cat in enumerate(core):
+        show_title = (idx == 0 and show_first_title) or (idx == 1 and show_second_title)
+        show_reset = (idx == 0 and show_first_reset) or (idx == 1 and show_second_reset)
+
+        usage = cat["utilization"]
+        glide = calc_glide_slope(cat["resets_at"], cat["window_seconds"])
+
+        if show_title:
+            name = cat["name"]
+            usage_str = f"{usage:.0f}% used"
+            try:
+                win.addstr(row, margin, name, curses.color_pair(5) | curses.A_BOLD)
+                if len(usage_str) < content_width - len(name):
+                    win.addstr(row, max_w - margin - len(usage_str), usage_str,
+                               curses.color_pair(5))
+            except curses.error:
+                pass
+            row += 1
+
+        if show_reset:
+            reset_str = format_reset_time(cat["resets_at"])
+            if reset_str:
+                try:
+                    win.addstr(row, margin, reset_str, curses.color_pair(5) | curses.A_DIM)
+                except curses.error:
+                    pass
+            row += 1
+
+        if row < max_h:
+            draw_bar(win, row, margin, content_width, usage, glide)
         row += 1
 
-    for cat in categories:
-        if row + 3 >= max_h - 2:
-            break
+        if show_spacing and idx < n - 1:
+            row += 1
 
+    # Extra categories (full detail, only shown when space permits)
+    for cat in show_extra:
+        if show_spacing:
+            row += 1
         usage = cat["utilization"]
         glide = calc_glide_slope(cat["resets_at"], cat["window_seconds"])
         reset_str = format_reset_time(cat["resets_at"])
 
-        # Line 1: name and usage %
         name = cat["name"]
         usage_str = f"{usage:.0f}% used"
         try:
             win.addstr(row, margin, name, curses.color_pair(5) | curses.A_BOLD)
             if len(usage_str) < content_width - len(name):
-                win.addstr(row, max_w - margin - len(usage_str), usage_str, curses.color_pair(5))
+                win.addstr(row, max_w - margin - len(usage_str), usage_str,
+                           curses.color_pair(5))
         except curses.error:
             pass
         row += 1
 
-        # Line 2: reset time
         if reset_str:
             try:
                 win.addstr(row, margin, reset_str, curses.color_pair(5) | curses.A_DIM)
@@ -353,12 +441,14 @@ def draw_ui(win, categories, extra_usage, last_fetch_time, error_msg):
                 pass
         row += 1
 
-        # Line 3: bar
-        draw_bar(win, row, margin, content_width, usage, glide)
-        row += 2
+        if row < max_h:
+            draw_bar(win, row, margin, content_width, usage, glide)
+        row += 1
 
     # Extra usage
-    if extra_usage and row + 3 < max_h - 2:
+    if show_extra_usage:
+        if show_spacing:
+            row += 1
         limit_dollars = extra_usage["monthly_limit"] / 100
         used_dollars = extra_usage["used_credits"] / 100
         name = "Extra usage (monthly)"
@@ -366,25 +456,84 @@ def draw_ui(win, categories, extra_usage, last_fetch_time, error_msg):
         try:
             win.addstr(row, margin, name, curses.color_pair(5) | curses.A_BOLD)
             if len(usage_str) < content_width - len(name):
-                win.addstr(row, max_w - margin - len(usage_str), usage_str, curses.color_pair(5))
+                win.addstr(row, max_w - margin - len(usage_str), usage_str,
+                           curses.color_pair(5))
         except curses.error:
             pass
         row += 2
-        draw_bar(win, row, margin, content_width, extra_usage["utilization"], 100)
-        row += 2
+        if row < max_h:
+            draw_bar(win, row, margin, content_width, extra_usage["utilization"], 100)
+        row += 1
 
     # Footer
-    footer = "q: quit  r: refresh"
-    footer_row = max_h - 1
-    if footer_row > row:
-        try:
-            footer_x = max_w - margin - len(footer)
-            if footer_x >= margin:
-                win.addstr(footer_row, footer_x, footer, curses.color_pair(5) | curses.A_DIM)
-        except curses.error:
-            pass
+    if show_footer:
+        footer = f"q: quit  r: refresh  t: interval ({refresh_interval}s)"
+        footer_row = max_h - 1
+        if footer_row > row:
+            try:
+                footer_x = max_w - margin - len(footer)
+                if footer_x >= margin:
+                    win.addstr(footer_row, footer_x, footer,
+                               curses.color_pair(5) | curses.A_DIM)
+            except curses.error:
+                pass
 
     win.noutrefresh()
+
+
+def prompt_interval(stdscr):
+    """Prompt user for new refresh interval. Returns seconds or None if cancelled."""
+    max_h, max_w = stdscr.getmaxyx()
+    row = max_h - 1
+    prompt = "Refresh interval (seconds): "
+
+    try:
+        # Clear the footer line
+        stdscr.move(row, 0)
+        stdscr.clrtoeol()
+        stdscr.addstr(row, 2, prompt, curses.color_pair(5) | curses.A_BOLD)
+    except curses.error:
+        return None
+
+    curses.curs_set(1)
+    stdscr.timeout(-1)
+    buf = ""
+    col = 2 + len(prompt)
+
+    while True:
+        ch = stdscr.getch()
+        if ch == 27:  # Escape - cancel
+            break
+        elif ch in (10, 13):  # Enter - confirm
+            try:
+                val = int(buf)
+                if val > 0:
+                    curses.curs_set(0)
+                    stdscr.timeout(1000)
+                    return val
+            except ValueError:
+                pass
+            break
+        elif ch in (8, 127, curses.KEY_BACKSPACE):
+            if buf:
+                buf = buf[:-1]
+                col -= 1
+                try:
+                    stdscr.addstr(row, col, " ")
+                    stdscr.move(row, col)
+                except curses.error:
+                    pass
+        elif 48 <= ch <= 57:  # digit
+            buf += chr(ch)
+            try:
+                stdscr.addstr(row, col, chr(ch), curses.color_pair(5))
+            except curses.error:
+                pass
+            col += 1
+
+    curses.curs_set(0)
+    stdscr.timeout(1000)
+    return None
 
 
 def main(stdscr):
@@ -407,6 +556,7 @@ def main(stdscr):
     error_msg = None
     escape_buf = []
     escape_time = 0
+    refresh_focused = REFRESH_FOCUSED
 
     def do_fetch():
         nonlocal categories, extra_usage, last_fetch_time, last_fetch_attempt, error_msg
@@ -428,7 +578,8 @@ def main(stdscr):
 
     try:
         while True:
-            draw_ui(stdscr, categories, extra_usage, last_fetch_time, error_msg)
+            draw_ui(stdscr, categories, extra_usage, last_fetch_time, error_msg,
+                    refresh_focused)
             curses.doupdate()
 
             ch = stdscr.getch()
@@ -454,6 +605,10 @@ def main(stdscr):
                 break
             elif ch == ord("r") or ch == ord("R"):
                 do_fetch()
+            elif ch == ord("t") or ch == ord("T"):
+                val = prompt_interval(stdscr)
+                if val is not None:
+                    refresh_focused = val
             elif ch == curses.KEY_RESIZE:
                 stdscr.clear()
 
@@ -464,7 +619,7 @@ def main(stdscr):
             # Check if refresh needed
             now = time.time()
             if last_fetch_time is not None:
-                interval = REFRESH_FOCUSED if has_focus else REFRESH_UNFOCUSED
+                interval = refresh_focused if has_focus else REFRESH_UNFOCUSED
                 if now - last_fetch_time >= interval:
                     do_fetch()
             elif error_msg and now - last_fetch_attempt >= 10:
