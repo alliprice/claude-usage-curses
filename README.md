@@ -49,9 +49,10 @@ claude-usage-monitor
 
 Controls:
 - `r` - Refresh usage data immediately
+- `t` - Set custom refresh interval (in seconds)
 - `q` - Quit
 
-The display will automatically refresh every 30 seconds when the terminal is focused, or every 10 minutes when unfocused.
+The display automatically refreshes every 30 seconds when the terminal is focused, or every 10 minutes when unfocused. The UI adapts to small terminals, scaling down to just two progress bars in a 2-line window.
 
 ## License
 
